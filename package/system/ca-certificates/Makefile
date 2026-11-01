@@ -7,23 +7,31 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ca-certificates
-PKG_VERSION:=20170717
-PKG_MAINTAINER:=Christian Schoenebeck <christian.schoenebeck@gmail.com>
+PKG_VERSION:=20260601
+PKG_RELEASE:=1
+PKG_MAINTAINER:=
+
+PKG_LICENSE:=GPL-2.0-or-later MPL-2.0
+PKG_LICENSE_FILES:=debian/copyright
 
 PKG_SOURCE:=$(PKG_NAME)_$(PKG_VERSION).tar.xz
-PKG_SOURCE_URL:=http://ftp.debian.org/debian/pool/main/c/ca-certificates
-PKG_HASH:=e487639b641fa75445174734dd6e9d600373e3248b3d86a7e3c6d0f6977decd2
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
-
+PKG_SOURCE_URL:=@DEBIAN/pool/main/c/ca-certificates
+PKG_HASH:=7ab6301f7f34eef90a4d278647c260bc0762e0e14561f4649854cf4b0d4bea21
 PKG_INSTALL:=1
 
 include $(INCLUDE_DIR)/package.mk
 
+TAR_OPTIONS+= --strip-components 1
+TAR_CMD=$(HOST_TAR) -C $(1) $(TAR_OPTIONS)
+
+# ca-certs is deprecated and new packages should use ca-certificates-any if
+# they don't need a specific package
 define Package/ca-certificates
   SECTION:=base
   CATEGORY:=Base system
   TITLE:=System CA certificates
   PKGARCH:=all
+  PROVIDES:=@ca-certs
 endef
 
 define Package/ca-bundle
@@ -31,6 +39,7 @@ define Package/ca-bundle
   CATEGORY:=Base system
   TITLE:=System CA certificates as a bundle
   PKGARCH:=all
+  PROVIDES:=@ca-certs @ca-certificates-any
 endef
 
 define Build/Install
@@ -57,6 +66,7 @@ endef
 define Package/ca-bundle/install
 	$(INSTALL_DIR) $(1)/etc/ssl/certs
 	cat $(PKG_INSTALL_DIR)/usr/share/ca-certificates/*/*.crt >$(1)/etc/ssl/certs/ca-certificates.crt
+	$(LN) /etc/ssl/certs/ca-certificates.crt $(1)/etc/ssl/cert.pem
 endef
-$(eval $(call BuildPackage,ca-certificates))
 $(eval $(call BuildPackage,ca-bundle))
+$(eval $(call BuildPackage,ca-certificates))

@@ -14,6 +14,7 @@
 #include <linux/phy.h>
 #include <linux/switch.h>
 #include <linux/platform_device.h>
+#include <linux/reset.h>
 
 struct rtl8366_smi_ops;
 struct rtl8366_vlan_ops;
@@ -21,6 +22,18 @@ struct mii_bus;
 struct dentry;
 struct inode;
 struct file;
+
+typedef enum rtl8367b_chip_e {
+	RTL8367B_CHIP_UNKNOWN,
+ /* Family B */
+	RTL8367B_CHIP_RTL8367RB,
+	RTL8367B_CHIP_RTL8367R_VB, /* chip with exception in extif assignment */
+/* Family C */
+	RTL8367B_CHIP_RTL8367RB_VB,
+	RTL8367B_CHIP_RTL8367S,
+/* Family D */
+	RTL8367B_CHIP_RTL8367S_VB /* chip with exception in extif assignment */
+} rtl8367b_chip_t;
 
 struct rtl8366_mib_counter {
 	unsigned	base;
@@ -33,7 +46,7 @@ struct rtl8366_smi {
 	struct device		*parent;
 	unsigned int		gpio_sda;
 	unsigned int		gpio_sck;
-	void			(*hw_reset)(bool active);
+	void			(*hw_reset)(struct rtl8366_smi *smi, bool active);
 	unsigned int		clk_delay;	/* ns */
 	u8			cmd_read;
 	u8			cmd_write;
@@ -54,11 +67,18 @@ struct rtl8366_smi {
 	int			vlan4k_enabled;
 
 	char			buf[4096];
+
+	struct reset_control	*reset;
+
 #ifdef CONFIG_RTL8366_SMI_DEBUG_FS
 	struct dentry           *debugfs_root;
 	u16			dbg_reg;
 	u8			dbg_vlan_4k_page;
 #endif
+	u32			phy_id;
+	rtl8367b_chip_t		rtl8367b_chip;
+	struct mii_bus		*ext_mbus;
+	struct rtl8366_vlan_mc *emu_vlanmc;
 };
 
 struct rtl8366_vlan_mc {
@@ -109,10 +129,6 @@ int rtl8366_smi_write_reg(struct rtl8366_smi *smi, u32 addr, u32 data);
 int rtl8366_smi_write_reg_noack(struct rtl8366_smi *smi, u32 addr, u32 data);
 int rtl8366_smi_read_reg(struct rtl8366_smi *smi, u32 addr, u32 *data);
 int rtl8366_smi_rmwr(struct rtl8366_smi *smi, u32 addr, u32 mask, u32 data);
-
-int rtl8366_reset_vlan(struct rtl8366_smi *smi);
-int rtl8366_enable_vlan(struct rtl8366_smi *smi, int enable);
-int rtl8366_enable_all_ports(struct rtl8366_smi *smi, int enable);
 
 #ifdef CONFIG_RTL8366_SMI_DEBUG_FS
 int rtl8366_debugfs_open(struct inode *inode, struct file *file);

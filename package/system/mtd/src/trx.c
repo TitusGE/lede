@@ -29,13 +29,13 @@
 #include <endian.h>
 #include <string.h>
 #include <errno.h>
+#include <netinet/in.h>
 
 #include <sys/ioctl.h>
 #include <mtd/mtd-user.h>
 #include "mtd.h"
 #include "crc32.h"
 
-#define TRX_MAGIC       0x30524448      /* "HDR0" */
 #define TRX_CRC32_DATA_OFFSET	12	/* First 12 bytes are not covered by CRC32 */
 #define TRX_CRC32_DATA_SIZE	16
 struct trx_header {
@@ -45,6 +45,12 @@ struct trx_header {
 	uint32_t flag_version;	/* 0:15 flags, 16:31 version */
 	uint32_t offsets[3];    /* Offsets of partitions from start of header */
 };
+
+#define min(x,y) ({		\
+	typeof(x) _x = (x);	\
+	typeof(y) _y = (y);	\
+	(void) (&_x == &_y);	\
+	_x < _y ? _x : _y; })
 
 #if __BYTE_ORDER == __BIG_ENDIAN
 #define STORE32_LE(X)           ((((X) & 0x000000FF) << 24) | (((X) & 0x0000FF00) << 8) | (((X) & 0x00FF0000) >> 8) | (((X) & 0xFF000000) >> 24))
@@ -77,7 +83,7 @@ trx_fixup(int fd, const char *name)
 		goto err;
 	}
 
-	bfd = mtd_open(name, true);
+	bfd = mtd_open(name, true, true);
 	ptr = mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, bfd, 0);
 	if (!ptr || (ptr == (void *) -1)) {
 		perror("mmap");
@@ -86,7 +92,7 @@ trx_fixup(int fd, const char *name)
 	}
 
 	trx = ptr;
-	if (trx->magic != TRX_MAGIC) {
+	if (ntohl(trx->magic) != opt_trxmagic) {
 		fprintf(stderr, "TRX header not found\n");
 		goto err;
 	}
@@ -104,7 +110,6 @@ err:
 	return -1;
 }
 
-#ifndef target_ar71xx
 int
 trx_check(int imagefd, const char *mtd, char *buf, int *len)
 {
@@ -122,7 +127,8 @@ trx_check(int imagefd, const char *mtd, char *buf, int *len)
 		}
 	}
 
-	if (trx->magic != TRX_MAGIC || trx->len < sizeof(struct trx_header)) {
+	if (ntohl(trx->magic) != opt_trxmagic ||
+	    trx->len < sizeof(struct trx_header)) {
 		if (quiet < 2) {
 			fprintf(stderr, "Bad trx header\n");
 			fprintf(stderr, "This is not the correct file format; refusing to flash.\n"
@@ -132,7 +138,7 @@ trx_check(int imagefd, const char *mtd, char *buf, int *len)
 	}
 
 	/* check if image fits to mtd device */
-	fd = mtd_check_open(mtd);
+	fd = mtd_check_open(mtd, true);
 	if(fd < 0) {
 		fprintf(stderr, "Could not open mtd device: %s\n", mtd);
 		exit(1);
@@ -147,7 +153,6 @@ trx_check(int imagefd, const char *mtd, char *buf, int *len)
 	close(fd);
 	return 1;
 }
-#endif
 
 int
 mtd_fixtrx(const char *mtd, size_t offset, size_t data_size)
@@ -156,14 +161,14 @@ mtd_fixtrx(const char *mtd, size_t offset, size_t data_size)
 	int fd;
 	struct trx_header *trx;
 	char *first_block;
-	char *buf;
+	char *buf, *to;
 	ssize_t res;
 	size_t block_offset;
 
 	if (quiet < 2)
-		fprintf(stderr, "Trying to fix trx header in %s at 0x%x...\n", mtd, offset);
+		fprintf(stderr, "Trying to fix trx header in %s at 0x%zx...\n", mtd, offset);
 
-	fd = mtd_check_open(mtd);
+	fd = mtd_check_open(mtd, true);
 	if(fd < 0) {
 		fprintf(stderr, "Could not open mtd device: %s\n", mtd);
 		exit(1);
@@ -196,16 +201,9 @@ mtd_fixtrx(const char *mtd, size_t offset, size_t data_size)
 	}
 
 	trx = (struct trx_header *)(first_block + offset);
-	if (trx->magic != STORE32_LE(0x30524448)) {
+	if (ntohl(trx->magic) != opt_trxmagic) {
 		fprintf(stderr, "No trx magic found\n");
 		exit(1);
-	}
-
-	if (trx->len == STORE32_LE(data_size + TRX_CRC32_DATA_OFFSET)) {
-		if (quiet < 2)
-			fprintf(stderr, "Header already fixed, exiting\n");
-		close(fd);
-		return 0;
 	}
 
 	buf = malloc(data_size);
@@ -214,17 +212,42 @@ mtd_fixtrx(const char *mtd, size_t offset, size_t data_size)
 		exit(1);
 	}
 
-	res = pread(fd, buf, data_size, data_offset);
-	if (res != data_size) {
-		perror("pread");
-		exit(1);
+	to = buf;
+	while (data_size) {
+		size_t read_block_offset = data_offset & ~(erasesize - 1);
+		size_t read_chunk;
+
+		read_chunk = erasesize - (data_offset & (erasesize - 1));
+		read_chunk = min(read_chunk, data_size);
+
+		/* Read from good blocks only to match CFE behavior */
+		if (!mtd_block_is_bad(fd, read_block_offset)) {
+			res = pread(fd, to, read_chunk, data_offset);
+			if (res != read_chunk) {
+				perror("pread");
+				exit(1);
+			}
+			to += read_chunk;
+		}
+
+		data_offset += read_chunk;
+		data_size -= read_chunk;
+	}
+	data_size = to - buf;
+
+	if (trx->len == STORE32_LE(data_size + TRX_CRC32_DATA_OFFSET) &&
+	    trx->crc32 == STORE32_LE(crc32buf(buf, data_size))) {
+		if (quiet < 2)
+			fprintf(stderr, "Header already fixed, exiting\n");
+		close(fd);
+		return 0;
 	}
 
 	trx->len = STORE32_LE(data_size + offsetof(struct trx_header, flag_version));
 
 	trx->crc32 = STORE32_LE(crc32buf(buf, data_size));
 	if (mtd_erase_block(fd, block_offset)) {
-		fprintf(stderr, "Can't erease block at 0x%x (%s)\n", block_offset, strerror(errno));
+		fprintf(stderr, "Can't erease block at 0x%zx (%s)\n", block_offset, strerror(errno));
 		exit(1);
 	}
 
@@ -244,4 +267,3 @@ mtd_fixtrx(const char *mtd, size_t offset, size_t data_size)
 	return 0;
 
 }
-

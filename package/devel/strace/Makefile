@@ -9,26 +9,27 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=strace
-PKG_VERSION:=4.20
-PKG_RELEASE:=1
+PKG_VERSION:=6.18
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.xz
-PKG_SOURCE_URL:=@SF/$(PKG_NAME)
-PKG_HASH:=5bf3148dd17306a42566f7da17368fdd781afa147db05ea63a4ca2b50f58c523
-
-PKG_LICENSE:=BSD-3c
-PKG_LICENSE_FILES:=COPYRIGHT
-PKG_CPE_ID:=cpe:/a:paul_kranenburg:strace
+PKG_SOURCE_URL:=https://strace.io/files/$(PKG_VERSION)
+PKG_HASH:=0ad5dcba973a69e779650ef1cb335b12ee60716fc7326609895bd33e6d2a7325
 
 PKG_MAINTAINER:=Felix Fietkau <nbd@nbd.name>
+PKG_LICENSE:=LGPL-2.1-or-later
+PKG_LICENSE_FILES:=COPYING
+PKG_CPE_ID:=cpe:/a:strace_project:strace
 
 PKG_FIXUP:=autoreconf
-PKG_CONFIG_DEPENDS:=CONFIG_PACKAGE_strace_libunwind
 PKG_INSTALL:=1
 
-include $(INCLUDE_DIR)/package.mk
+PKG_CONFIG_DEPENDS := \
+	CONFIG_STRACE_LIBDW \
+	CONFIG_STRACE_LIBUNWIND
 
-HOST_CFLAGS += -I$(LINUX_DIR)/user_headers/include
+include $(INCLUDE_DIR)/package.mk
+include $(INCLUDE_DIR)/nls.mk
 
 CONFIGURE_VARS+= \
 	LDFLAGS_FOR_BUILD="$(HOST_LDFLAGS)" \
@@ -40,22 +41,38 @@ define Package/strace
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=System call tracer
-  DEPENDS:=+PACKAGE_strace_libunwind:libunwind
-  URL:=http://strace.sourceforge.net/
+  URL:=https://strace.io/
+  DEPENDS:=+STRACE_LIBDW:libdw +STRACE_LIBUNWIND:libunwind
 endef
 
 define Package/strace/description
-A useful diagnostic, instructional, and debugging tool. Allows you to track what
-system calls a program makes while it is running.
+  A useful diagnostic, instructional, and debugging tool. Allows you to track what
+  system calls a program makes while it is running.
 endef
 
 define Package/strace/config
-config PACKAGE_strace_libunwind
-	bool "Enable stack tracing support using libunwind (experimental)"
-	default n
+choice
+	prompt "stack tracing support"
+	default STRACE_NONE
+
+	config STRACE_NONE
+		bool "None"
+
+	config STRACE_LIBDW
+		bool "libdw"
+
+	config STRACE_LIBUNWIND
+		bool "libunwind (experimental)"
+endchoice
 endef
 
-CONFIGURE_ARGS += --with-libunwind=$(if $(CONFIG_PACKAGE_strace_libunwind),yes,no)
+CONFIGURE_ARGS += \
+	--with-libdw=$(if $(CONFIG_STRACE_LIBDW),yes,no) \
+	--with-libunwind=$(if $(CONFIG_STRACE_LIBUNWIND),yes,no) \
+	--enable-mpers=no \
+	--enable-bundled=yes \
+	--without-libselinux
+
 MAKE_FLAGS := \
 	CCOPT="$(TARGET_CFLAGS)"
 

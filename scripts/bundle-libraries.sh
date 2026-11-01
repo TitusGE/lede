@@ -87,7 +87,11 @@ _runas_so() {
 			return 0;
 		}
 
+		#ifdef __APPLE__
+		__attribute__((section("__DATA,__mod_init_func")))
+		#else
 		__attribute__((section(".init_array")))
+		#endif
 		static void *mangle_arg0_constructor = &mangle_arg0;
 	EOT
 
@@ -107,6 +111,35 @@ _patch_ldso() {
 		echo "binary patched ${1##*/} not executable, using original" >&2
 		rm -f "$1.patched"
 	fi
+}
+
+_patch_glibc() {
+	_cp "$1" "$1.patched"
+	sed -i -e 's,/usr/\(\(lib\|share\)/locale\),/###/\1,g' "$1.patched"
+
+	if "$1.patched" 2>&1 | grep -q -- GNU; then
+		_mv "$1.patched" "$1"
+	else
+		echo "binary patched ${1##*/} not executable, using original" >&2
+		rm -f "$1.patched"
+	fi
+}
+
+should_be_patched() {
+	local bin="$1"
+
+	[ -x "$bin" ] || return 1
+
+	case "$bin" in
+		*.so|*.so.[0-9]*)
+			return 1
+		;;
+		*)
+			file "$bin" | grep -sqE "ELF.*(executable|interpreter)" && return 0
+		;;
+	esac
+
+	return 1
 }
 
 for LDD in ${PATH//://ldd }/ldd; do
@@ -134,20 +167,23 @@ for BIN in "$@"; do
 
 	LDSO=""
 
-	[ -n "$LDD" ] && [ -x "$BIN" ] && file "$BIN" | grep -sqE "ELF.*(executable|interpreter)" && {
+	[ -n "$LDD" ] && should_be_patched "$BIN" && {
 		for token in $("$LDD" "$BIN" 2>/dev/null); do
 			case "$token" in */*.so*)
-				case "$token" in
-					*ld-*.so*) LDSO="${token##*/}" ;;
-				esac
-
 				dest="$DIR/lib/${token##*/}"
 				ddir="${dest%/*}"
+
+				case "$token" in
+					*/ld-*.so*) LDSO="${token##*/}" ;;
+				esac
 
 				[ -f "$token" -a ! -f "$dest" ] && {
 					_md "$ddir"
 					_cp "$token" "$dest"
-					[ -n "$LDSO" ] && _patch_ldso "$dest"
+					case "$token" in
+						*/ld-*.so*) _patch_ldso "$dest" ;;
+						*/libc.so.6) _patch_glibc "$dest" ;;
+					esac
 				}
 			;; esac
 		done
@@ -167,7 +203,7 @@ for BIN in "$@"; do
 			#!/usr/bin/env bash
 			dir="\$(dirname "\$0")"
 			export RUNAS_ARG0="\$0"
-			export LD_PRELOAD="\$dir/${REL:+$REL/}runas.so"
+			export LD_PRELOAD="\${LD_PRELOAD:+\$LD_PRELOAD:}\$dir/${REL:+$REL/}runas.so"
 			exec "\$dir/${REL:+$REL/}$LDSO" --library-path "\$dir/${REL:+$REL/}" "\$dir/.${BIN##*/}.bin" "\$@"
 		EOF
 

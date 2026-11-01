@@ -29,15 +29,15 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/ioctl.h>
 #include <linux/atmdev.h>
+#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/atm.h>
 #include <linux/clk.h>
 #include <linux/interrupt.h>
@@ -187,7 +187,6 @@ static inline void u64_add_u32(ppe_u64_t, unsigned int, ppe_u64_t *);
  */
 static inline struct sk_buff* alloc_skb_rx(void);
 static inline struct sk_buff* alloc_skb_tx(unsigned int);
-struct sk_buff* atm_alloc_tx(struct atm_vcc *, unsigned int);
 static inline void atm_free_tx_skb_vcc(struct sk_buff *, struct atm_vcc *);
 static inline struct sk_buff *get_skb_rx_pointer(unsigned int);
 static inline int get_tx_desc(unsigned int);
@@ -200,7 +199,7 @@ static inline void mailbox_aal_rx_handler(void);
 static irqreturn_t mailbox_irq_handler(int, void *);
 static inline void mailbox_signal(unsigned int, int);
 static void do_ppe_tasklet(unsigned long);
-DECLARE_TASKLET(g_dma_tasklet, do_ppe_tasklet, 0);
+DECLARE_TASKLET_OLD(g_dma_tasklet, do_ppe_tasklet);
 
 /*
  *  QSB & HTU setting functions
@@ -261,8 +260,6 @@ EXPORT_SYMBOL(ifx_mei_atm_showtime_exit);
 
 #endif
 
-static struct sk_buff* (*ifx_atm_alloc_tx)(struct atm_vcc *, unsigned int) = NULL;
-
 static struct atm_priv_data g_atm_priv_data;
 
 static struct atmdev_ops g_ifx_atm_ops = {
@@ -292,9 +289,9 @@ static int ppe_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 		return -ENOTTY;
 
 	if ( _IOC_DIR(cmd) & _IOC_READ )
-		ret = !access_ok(VERIFY_WRITE, arg, _IOC_SIZE(cmd));
+		ret = !access_ok(arg, _IOC_SIZE(cmd));
 	else if ( _IOC_DIR(cmd) & _IOC_WRITE )
-		ret = !access_ok(VERIFY_READ, arg, _IOC_SIZE(cmd));
+		ret = !access_ok(arg, _IOC_SIZE(cmd));
 	if ( ret )
 		return -EFAULT;
 
@@ -336,7 +333,8 @@ static int ppe_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 		break;
 
 	case PPE_ATM_MIB_VCC:   /*  VCC related MIB */
-		copy_from_user(&mib_vcc, arg, sizeof(mib_vcc));
+		if (copy_from_user(&mib_vcc, arg, sizeof(mib_vcc)))
+			return -EFAULT;
 		conn = find_vpivci(mib_vcc.vpi, mib_vcc.vci);
 		if (conn >= 0) {
 			mib_vcc.mib_vcc.aal5VccCrcErrors     = g_atm_priv_data.conn[conn].aal5_vcc_crc_err;
@@ -430,12 +428,10 @@ static int ppe_open(struct atm_vcc *vcc)
 
 	/*  enable irq  */
 	if ( f_enable_irq ) {
-		ifx_atm_alloc_tx = atm_alloc_tx;
-
 		*MBOX_IGU1_ISRC = (1 << RX_DMA_CH_AAL) | (1 << RX_DMA_CH_OAM);
 		*MBOX_IGU1_IER  = (1 << RX_DMA_CH_AAL) | (1 << RX_DMA_CH_OAM);
 
-		enable_irq(PPE_MAILBOX_IGU1_INT);
+		enable_irq(g_atm_priv_data.irq);
 	}
 
 	/*  set port    */
@@ -480,10 +476,8 @@ static void ppe_close(struct atm_vcc *vcc)
 	clear_bit(conn, &g_atm_priv_data.conn_table);
 
 	/*  disable irq */
-	if ( g_atm_priv_data.conn_table == 0 ) {
-		disable_irq(PPE_MAILBOX_IGU1_INT);
-		ifx_atm_alloc_tx = NULL;
-	}
+	if ( g_atm_priv_data.conn_table == 0 )
+		disable_irq(g_atm_priv_data.irq);
 
 	/*  release bandwidth   */
 	switch ( vcc->qos.txtp.traffic_class )
@@ -785,42 +779,6 @@ static inline struct sk_buff* alloc_skb_tx(unsigned int size)
 	return skb;
 }
 
-struct sk_buff* atm_alloc_tx(struct atm_vcc *vcc, unsigned int size)
-{
-	int conn;
-	struct sk_buff *skb;
-
-	/*  oversize packet */
-	if ( size > aal5s_max_packet_size ) {
-		pr_err("atm_alloc_tx: oversize packet\n");
-		return NULL;
-	}
-	/*  send buffer overflow    */
-	if ( sk_wmem_alloc_get(sk_atm(vcc)) && !atm_may_send(vcc, size) ) {
-		pr_err("atm_alloc_tx: send buffer overflow\n");
-		return NULL;
-	}
-	conn = find_vcc(vcc);
-	if ( conn < 0 ) {
-		pr_err("atm_alloc_tx: unknown VCC\n");
-		return NULL;
-	}
-
-	skb = dev_alloc_skb(size);
-	if ( skb == NULL ) {
-		pr_err("atm_alloc_tx: sk buffer is used up\n");
-		return NULL;
-	}
-
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0))
-	refcount_add(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc);
-#else
-	atomic_add(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc);
-#endif
-
-	return skb;
-}
-
 static inline void atm_free_tx_skb_vcc(struct sk_buff *skb, struct atm_vcc *vcc)
 {
 	if ( vcc->pop != NULL )
@@ -1060,7 +1018,7 @@ static void do_ppe_tasklet(unsigned long data)
 	else if (*MBOX_IGU1_ISR >> (FIRST_QSB_QID + 16)) /* TX queue */
 		tasklet_schedule(&g_dma_tasklet);
 	else
-		enable_irq(PPE_MAILBOX_IGU1_INT);
+		enable_irq(g_atm_priv_data.irq);
 }
 
 static irqreturn_t mailbox_irq_handler(int irq, void *dev_id)
@@ -1068,7 +1026,7 @@ static irqreturn_t mailbox_irq_handler(int irq, void *dev_id)
 	if ( !*MBOX_IGU1_ISR )
 		return IRQ_HANDLED;
 
-	disable_irq_nosync(PPE_MAILBOX_IGU1_INT);
+	disable_irq_nosync(g_atm_priv_data.irq);
 	tasklet_schedule(&g_dma_tasklet);
 
 	return IRQ_HANDLED;
@@ -1539,17 +1497,10 @@ static inline void clear_priv_data(void)
 		}
 	}
 
-	if ( g_atm_priv_data.tx_skb_base != NULL )
-		kfree(g_atm_priv_data.tx_skb_base);
-
-	if ( g_atm_priv_data.tx_desc_base != NULL )
-		kfree(g_atm_priv_data.tx_desc_base);
-
-	if ( g_atm_priv_data.oam_buf_base != NULL )
-		kfree(g_atm_priv_data.oam_buf_base);
-
-	if ( g_atm_priv_data.oam_desc_base != NULL )
-		kfree(g_atm_priv_data.oam_desc_base);
+	kfree(g_atm_priv_data.tx_skb_base);
+	kfree(g_atm_priv_data.tx_desc_base);
+	kfree(g_atm_priv_data.oam_buf_base);
+	kfree(g_atm_priv_data.oam_desc_base);
 
 	if ( g_atm_priv_data.aal_desc_base != NULL ) {
 		for ( i = 0; i < dma_rx_descriptor_length; i++ ) {
@@ -1558,8 +1509,9 @@ static inline void clear_priv_data(void)
 				dev_kfree_skb_any(skb);
 			}
 		}
-		kfree(g_atm_priv_data.aal_desc_base);
 	}
+
+	kfree(g_atm_priv_data.aal_desc_base);
 }
 
 static inline void init_rx_tables(void)
@@ -1798,19 +1750,11 @@ MODULE_DEVICE_TABLE(of, ltq_atm_match);
 
 static int ltq_atm_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *match;
-	struct ltq_atm_ops *ops = NULL;
+	const struct ltq_atm_ops *ops;
 	int ret;
 	int port_num;
 	struct port_cell_info port_cell = {0};
 	char ver_str[256];
-
-	match = of_match_device(ltq_atm_match, &pdev->dev);
-	if (!match) {
-		dev_err(&pdev->dev, "failed to find matching device\n");
-		return -ENOENT;
-	}
-	ops = (struct ltq_atm_ops *) match->data;
 
 	check_parameters();
 
@@ -1820,7 +1764,11 @@ static int ltq_atm_probe(struct platform_device *pdev)
 		goto INIT_PRIV_DATA_FAIL;
 	}
 
-	ops->init();
+	ops = of_device_get_match_data(&pdev->dev);
+	ret = ops->init(pdev);
+	if (ret)
+		return ret;
+
 	init_rx_tables();
 	init_tx_tables();
 
@@ -1843,21 +1791,23 @@ static int ltq_atm_probe(struct platform_device *pdev)
 		}
 	}
 
+	g_atm_priv_data.irq = platform_get_irq(pdev, 0);
+	if (g_atm_priv_data.irq < 0) {
+		pr_err("platform_get_irq fail");
+		goto REQUEST_IRQ_PPE_MAILBOX_IGU1_INT_FAIL;
+	}
+
 	/*  register interrupt handler  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
-	ret = request_irq(PPE_MAILBOX_IGU1_INT, mailbox_irq_handler, 0, "atm_mailbox_isr", &g_atm_priv_data);
-#else
-	ret = request_irq(PPE_MAILBOX_IGU1_INT, mailbox_irq_handler, IRQF_DISABLED, "atm_mailbox_isr", &g_atm_priv_data);
-#endif
+	ret = request_irq(g_atm_priv_data.irq, mailbox_irq_handler, 0, "atm_mailbox_isr", &g_atm_priv_data);
 	if ( ret ) {
 		if ( ret == -EBUSY ) {
 			pr_err("IRQ may be occupied by other driver, please reconfig to disable it.\n");
 		} else {
-			pr_err("request_irq fail irq:%d\n", PPE_MAILBOX_IGU1_INT);
+			pr_err("request_irq fail irq:%d\n", g_atm_priv_data.irq);
 		}
 		goto REQUEST_IRQ_PPE_MAILBOX_IGU1_INT_FAIL;
 	}
-	disable_irq(PPE_MAILBOX_IGU1_INT);
+	disable_irq(g_atm_priv_data.irq);
 
 
 	ret = ops->start(0);
@@ -1881,13 +1831,13 @@ static int ltq_atm_probe(struct platform_device *pdev)
 
 	ifx_atm_version(ops, ver_str);
 	printk(KERN_INFO "%s", ver_str);
-	platform_set_drvdata(pdev, ops);
+	platform_set_drvdata(pdev, (void *)ops);
 	printk("ifxmips_atm: ATM init succeed\n");
 
 	return 0;
 
 PP32_START_FAIL:
-	free_irq(PPE_MAILBOX_IGU1_INT, &g_atm_priv_data);
+	free_irq(g_atm_priv_data.irq, &g_atm_priv_data);
 REQUEST_IRQ_PPE_MAILBOX_IGU1_INT_FAIL:
 ATM_DEV_REGISTER_FAIL:
 	while ( port_num-- > 0 )
@@ -1898,7 +1848,7 @@ INIT_PRIV_DATA_FAIL:
 	return ret;
 }
 
-static int ltq_atm_remove(struct platform_device *pdev)
+static void ltq_atm_remove(struct platform_device *pdev)
 {
 	int port_num;
 	struct ltq_atm_ops *ops = platform_get_drvdata(pdev);
@@ -1910,7 +1860,7 @@ static int ltq_atm_remove(struct platform_device *pdev)
 
 	ops->stop(0);
 
-	free_irq(PPE_MAILBOX_IGU1_INT, &g_atm_priv_data);
+	free_irq(g_atm_priv_data.irq, &g_atm_priv_data);
 
 	for ( port_num = 0; port_num < ATM_PORT_NUMBER; port_num++ )
 		atm_dev_deregister(g_atm_priv_data.port[port_num].dev);
@@ -1918,16 +1868,13 @@ static int ltq_atm_remove(struct platform_device *pdev)
 	ops->shutdown();
 
 	clear_priv_data();
-
-	return 0;
 }
 
 static struct platform_driver ltq_atm_driver = {
-	.probe = ltq_atm_probe,
+	.probe  = ltq_atm_probe,
 	.remove = ltq_atm_remove,
 	.driver = {
 		.name = "atm",
-		.owner = THIS_MODULE,
 		.of_match_table = ltq_atm_match,
 	},
 };
